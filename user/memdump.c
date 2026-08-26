@@ -3,6 +3,7 @@
 #include "kernel/fcntl.h"
 
 void memdump(char *fmt, char *data);
+#define BUFSIZE 1024
 
 int
 main(int argc, char *argv[])
@@ -60,6 +61,37 @@ main(int argc, char *argv[])
 void
 memdump(char *fmt, char *data)
 {
-  // Your code here.
+  // Your code here
+  while (*fmt) {o
+    if (*fmt == 'i') {
+      int x = *(int *)data;
+      printf("%d\n", x);
+      data += 4;
+    }
+    else if (*fmt == 'p') {
+      uint64 x = *(uint64 *)data;
+      printf("%lx\n", x);
+      data += 8;
+    }
+    else if (*fmt == 'h') {
+      short x = *(short *)data;
+      printf("%d\n", x);
+      data += 2;
+    }
+    else if (*fmt == 'c') {
+      printf("%c\n", *data);
+      data += 1;
+    }
+    else if (*fmt == 's') {
+      char *s = *(char **)data;
+      printf("%s\n", s);
+      data += 8;
+    }
+    else if (*fmt == 'S') {
+      printf("%s\n", data);
+      return;
+    }
 
+    fmt++;
+  }
 }
