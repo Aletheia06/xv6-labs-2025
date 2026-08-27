@@ -195,6 +195,9 @@ UPROGS=\
 	$U/_logstress\
 	$U/_forphan\
 	$U/_dorphan\
+	$U/_sandbox\
+	$U/_secret\
+	$U/_attack\
 
 
 

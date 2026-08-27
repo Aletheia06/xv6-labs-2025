@@ -1,3 +1,5 @@
+#include "param.h"
+
 // Saved registers for kernel context switches.
 struct context {
   uint64 ra;
@@ -91,6 +93,10 @@ struct proc {
   int killed;                  // If non-zero, have been killed
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID
+
+  // the following elements are used for sandbox
+  int mask;                    // if the system call must be rejected
+  char* path;          // the path is allowed to open and exec
 
   // wait_lock must be held when using this:
   struct proc *parent;         // Parent process

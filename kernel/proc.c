@@ -273,6 +273,11 @@ kfork(void)
   }
   np->sz = p->sz;
 
+  // copy mask and path from parent to child
+  // for sandbox
+  np->mask = p->mask;
+  np->path = p->path;
+
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
 
