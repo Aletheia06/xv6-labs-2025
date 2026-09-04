@@ -1,3 +1,5 @@
+#include "riscv.h"
+#include "types.h"
 #ifdef LAB_MMAP
 gtypedef unsigned long size_t;
 typedef long int off_t;
@@ -64,7 +66,10 @@ void            ireclaim(int);
 
 // kalloc.c
 void*           kalloc(void);
+void*           superalloc(void);
 void            kfree(void *);
+void            superfree(void *);
+pte_t*           superwalk(pagetable_t, uint64, int, int *);
 void            kinit(void);
 
 // log.c

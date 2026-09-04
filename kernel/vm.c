@@ -8,6 +8,8 @@
 #include "proc.h"
 #include "fs.h"
 
+void vmprint_directory(pagetable_t pagetable, int level, uint64 base_va);
+
 /*
  * the kernel's page table.
  */
@@ -101,6 +103,10 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
   for(int level = 2; level > 0; level--) {
     pte_t *pte = &pagetable[PX(level, va)];
     if(*pte & PTE_V) {
+      if ((*pte & (PTE_R | PTE_W | PTE_X))) {
+        return pte;
+      }
+
       pagetable = (pagetable_t)PTE2PA(*pte);
 #ifdef LAB_PGTBL
       if(PTE_LEAF(*pte)) {
@@ -117,6 +123,41 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
   return &pagetable[PX(0, va)];
 }
 
+#ifdef LAB_PGTBL
+
+pte_t *
+superwalk(pagetable_t pagetable, uint64 va, int alloc, int *l) {
+  if (va >= MAXVA)
+    panic("superwalk");
+
+  for (int level = 2;level > *l;level--) {
+    pte_t *pte = &pagetable[PX(level, va)];
+    if (*pte & PTE_V) {
+      // 页表有效，转为物理地址
+      pagetable = (pagetable_t)PTE2PA(*pte);
+      if (PTE_LEAF(*pte)) {
+        //是叶子节点，即找到想要的了，更新页表级别，返回页表地址
+        *l = level;
+        return pte;
+      }
+    }
+    else {
+      // 页表无效，先尝试分配
+      if (!alloc || (pagetable = (pte_t *)kalloc()) == 0)
+        return 0;
+
+      memset(pagetable, 0, PGSIZE);
+      // 更新页表项为有效
+      *pte = PA2PTE(pagetable) | PTE_V;
+    }
+  }
+  return &pagetable[PX(*l, va)];
+}
+
+#endif
+
+
+
 // Look up a virtual address, return the physical address,
 // or 0 if not mapped.
 // Can only be used to look up user pages.
@@ -125,18 +166,28 @@ walkaddr(pagetable_t pagetable, uint64 va)
 {
   pte_t *pte;
   uint64 pa;
+  int level;
 
   if(va >= MAXVA)
     return 0;
 
-  pte = walk(pagetable, va, 0);
-  if(pte == 0)
-    return 0;
+  // 自己按层级走一遍，这样能知道命中的叶子是不是 level-1 的超级页
+  for(level = 2; level > 0; level--){
+    pte = &pagetable[PX(level, va)];
+    if((*pte & PTE_V) == 0)
+      return 0;
+    if(PTE_LEAF(*pte))
+      break; // level-1 的超级页叶子
+    pagetable = (pagetable_t)PTE2PA(*pte);
+  }
+  pte = &pagetable[PX(level, va)];
   if((*pte & PTE_V) == 0)
     return 0;
   if((*pte & PTE_U) == 0)
     return 0;
   pa = PTE2PA(*pte);
+  if(level > 0)
+    pa += va & (SUPERPGSIZE - 1); // 超级页内偏移，否则 copyin/copyout 会读写错物理地址
   return pa;
 }
 
@@ -145,8 +196,50 @@ walkaddr(pagetable_t pagetable, uint64 va)
 void
 vmprint(pagetable_t pagetable) {
   // your code here
+  printf("page table %p\n", (void *)pagetable);
+  vmprint_directory(pagetable, 0, 0);
+
 }
+
+void vmprint_directory(pagetable_t pagetable, int level, uint64 base_va) {
+  for (int i = 0;i < 512; i++) {
+    pte_t pte = pagetable[i];
+    // if is valid
+    if (pte & PTE_V) {
+      uint64 va = base_va | ((uint64)i << (PGSHIFT + 18 - level * 9));
+      uint64 pa = PTE2PA(pte);
+
+      if (level == 0) {
+        printf(" ..");
+      }
+      else if (level == 1) {
+        printf(" .. ..");
+      }
+      else if (level == 2) {
+        printf(" .. .. ..");
+      }
+
+      printf("%p: pte %p pa %p", (void *)va, (void *)pte, (void *)pa);
+
+      if ((pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+        printf("\n");
+        vmprint_directory((pagetable_t)pa, level + 1, va);
+      }
+      else {
+        if (pte & PTE_R) printf(" R");
+        if (pte & PTE_W) printf(" W");
+        if (pte & PTE_X) printf(" X");
+        if (pte & PTE_U) printf(" U");
+        printf("\n");
+      }
+    }
+  }
+}
+
+
 #endif
+
+
 
 
 
@@ -165,6 +258,7 @@ kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
 // va and size MUST be page-aligned.
 // Returns 0 on success, -1 if walk() couldn't
 // allocate a needed page-table page.
+
 int
 mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
 {
@@ -179,19 +273,61 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
 
   if(size == 0)
     panic("mappages: size");
-  
+
   a = va;
   last = va + size - PGSIZE;
-  for(;;){
-    if((pte = walk(pagetable, a, 1)) == 0)
+  for (;;) {
+#ifdef LAB_PGTBL
+    int use_superpage = 0; // 用于标识是否使用超级页面映射
+    // 判断是否可以使用超级页面映射
+    if ((a % SUPERPGSIZE) == 0 && (a + SUPERPGSIZE <= last + PGSIZE) && (perm & PTE_U)) {
+      use_superpage = 1; // 更改标识
+    }
+    // 如果是超级页则设置l为1，代表接下来在superwalk当中到1层后停止
+    // 传统的walk会走到level0，之后返回pte（页表项地址）
+    // 而改进过的superwalk可以被人为操控停到指定的层级。
+    //  层级从高到底为：2 1 0
+    if (use_superpage) {
+      int l = 1;
+      if ((pte = superwalk(pagetable, a, 1, &l)) == 0)
+        return -1;
+    } else {
+      if ((pte = walk(pagetable, a, 1)) == 0)
+        return -1;
+    }
+#else
+    // 如果不能使用超级页面映射 就用普通页
+    if ((pte = walk(pagetable, a, 1)) == 0)
       return -1;
-    if(*pte & PTE_V)
+#endif
+    // 检查PTE是否已经被标记为有效
+    if (*pte & PTE_V)
       panic("mappages: remap");
+    // 如果有效则将物理地址转换为PTE格式 并加上权限位和有效位
+    // 这里就是添加映射的核心
     *pte = PA2PTE(pa) | perm | PTE_V;
-    if(a == last)
+#ifdef LAB_PGTBL
+    //如果使用超级页
+    if (use_superpage) {
+      // 则检查是否已经映射到最后一个超级页面
+      if (a + SUPERPGSIZE == last + PGSIZE)
+        break;
+      // 更新起始地址和物理地址
+      a += SUPERPGSIZE;
+      pa += SUPERPGSIZE;
+    } else {
+      if (a == last)
+        break;
+      a += PGSIZE;
+      pa += PGSIZE;
+    }
+#else
+    //不使用超级页，则每次自增一个普通页的大小
+    if (a == last)
       break;
     a += PGSIZE;
     pa += PGSIZE;
+#endif
   }
   return 0;
 }
@@ -212,29 +348,71 @@ uvmcreate()
 // Remove npages of mappings starting from va. va must be
 // page-aligned. It's OK if the mappings don't exist.
 // Optionally free the physical memory.
+
 void
 uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 {
   uint64 a;
   pte_t *pte;
-  int sz = PGSIZE;
+  int sz;
 
   if((va % PGSIZE) != 0)
     panic("uvmunmap: not aligned");
 
   for(a = va; a < va + npages*PGSIZE; a += sz){
-    if((pte = walk(pagetable, a, 0)) == 0) // leaf page table entry allocated?
-      continue;
-    if((*pte & PTE_V) == 0)  // has physical page been allocated?
-      continue;
     sz = PGSIZE;
+#ifdef LAB_PGTBL
+    int l = 0; // 标志变量 用于确定是超级页还是普通页。
+    int flag = 0; // 标记是否已经处理过超级页
+    if((pte = superwalk(pagetable, a, 0, &l)) == 0)
+      panic("uvmunmap: walk");
+#else
+    if((pte = walk(pagetable, a, 0)) == 0)
+      panic("uvmunmap: walk");
+#endif
+    if((*pte & PTE_V) == 0) {
+      printf("va=%ld pte=%ld\n", a, *pte);
+      panic("uvmunmap: not mapped");
+    }
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
+
+    /*下面开始解除页面映射*/
     if(do_free){
-      uint64 pa = PTE2PA(*pte);
-      kfree((void*)pa);
+      uint64 pa = PTE2PA(*pte); //  从页表项中提取物理地址
+#ifdef LAB_PGTBL
+      if(l == 1) {
+        // 如果是超级页则获取权限
+        int perm = *pte & 0xFFF;
+        // 然后清空页表项
+        *pte = 0;
+        // 设置标志
+        flag = 1;
+        // 更新大小为超级页大小
+        sz = SUPERPGSIZE;
+        // 这里是上述的第三种情况，如果虚拟地址未对齐到超级页
+        if(a % SUPERPGSIZE != 0){
+          // 对齐到超级页边界
+          for(uint64 i = SUPERPGROUNDDOWN(a); i < va; i += PGSIZE) {
+            char *mem = kalloc(); // 分配新的物理页面
+            if(mem == 0)
+              panic("uvmunmap: kalloc");
+            mappages(pagetable, i, PGSIZE, (uint64)mem, perm); // 将新分配的页面映射到虚拟地址空间
+            memmove(mem, (char*)pa + i - SUPERPGROUNDDOWN(a), PGSIZE); // 将数据从超级页复制到新分配的页面
+          }
+          a = SUPERPGROUNDUP(a); // 更新虚拟地址
+          sz = 0; // 更新大小
+        }
+        superfree((void*)pa); // 释放超级页
+      } else
+#endif
+        // 如果是普通页
+          kfree((void*)pa); // 释放普通页
     }
-    *pte = 0;
+#ifdef LAB_PGTBL
+    if(flag == 0) // 避免使用超级页时候被重复清除
+#endif
+      *pte = 0;
   }
 }
 
@@ -254,6 +432,15 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
   oldsz = PGROUNDUP(oldsz);
   for(a = oldsz; a < newsz; a += sz){
     sz = PGSIZE;
+#ifdef LAB_PGTBL
+    // 先判断能不能分配superpage
+    if (newsz - a >= SUPERPGSIZE && a % SUPERPGSIZE == 0) {
+      // 现在设置sz是超级页的大小
+      sz = SUPERPGSIZE;
+      // 然后用superalloc
+      mem = superalloc();
+    }else
+#endif
     mem = kalloc();
     if(mem == 0){
       uvmdealloc(pagetable, a, oldsz);
@@ -326,6 +513,7 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 // physical memory.
 // returns 0 on success, -1 on failure.
 // frees any allocated pages on failure.
+
 int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
@@ -333,29 +521,56 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   uint64 pa, i;
   uint flags;
   char *mem;
-  int szinc = PGSIZE;
+  int szinc;
 
   for(i = 0; i < sz; i += szinc){
-    if((pte = walk(old, i, 0)) == 0)
-      continue;
-    if((*pte & PTE_V) == 0) {
-      continue;
-    }
     szinc = PGSIZE;
+#ifdef LAB_PGTBL
+    int l = 0; // 标志变量 用于确定是普通页还是超级页
+    if((pte = superwalk(old, i, 0, &l)) == 0)
+      // 如果是超级页l=1,普通页l=0
+        panic("uvmcopy: pte should exist");
+#else
+    if((pte = walk(old, i, 0)) == 0)
+      panic("uvmcopy: pte should exist");
+#endif
+    if((*pte & PTE_V) == 0)
+      panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
-      goto err;
+#ifdef LAB_PGTBL
+    if(l == 1) {
+      // 如果是超级页则将地址增量设置为超级页的大小
+      szinc = SUPERPGSIZE;
+      // 分配超级页大小的内存
+      if((mem = superalloc()) == 0)
+        goto err;
+      // 将超级页大小的物理内存从旧地址复制到新分配的内存地址（父进程的数据负责给子进程）
+      memmove(mem, (char*)pa, SUPERPGSIZE);
+      // 将超级页大小的新内存映射到新页表的虚拟地址
+      if(mappages(new, i, SUPERPGSIZE, (uint64)mem, flags) != 0){
+        // 释放之前分配的超级页内存
+        superfree(mem);
+        goto err;
+      }
+    } else {
+      // 如果是普通页
+#endif
+      if((mem = kalloc()) == 0)
+        goto err;
+      memmove(mem, (char*)pa, PGSIZE);
+      if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
+        kfree(mem);
+        goto err;
+      }
+#ifdef LAB_PGTBL
     }
+#endif
   }
   return 0;
 
- err:
-  uvmunmap(new, 0, i / PGSIZE, 1);
+  err:
+   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
 }
 
