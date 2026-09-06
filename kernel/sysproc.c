@@ -67,7 +67,6 @@ sys_pause(void)
 {
   int n;
   uint ticks0;
-
   argint(0, &n);
   if(n < 0)
     n = 0;
@@ -80,6 +79,7 @@ sys_pause(void)
     }
     sleep(&ticks, &tickslock);
   }
+  backtrace();
   release(&tickslock);
   return 0;
 }

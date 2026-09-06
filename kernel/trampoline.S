@@ -1,13 +1,11 @@
         #
-        # low-level code to handle traps from user space into
-        # the kernel, and returns from kernel to user.
+        # 底层代码，用于处理从用户态陷入内核的陷阱（trap），
+        # 以及从内核返回用户态。
         #
-        # the kernel maps the page holding this code
-        # at the same virtual address (TRAMPOLINE)
-        # in user and kernel space so that it continues
-        # to work when it switches page tables.
-        # kernel.ld causes this code to start at 
-        # a page boundary.
+        # 内核将存放这段代码的页面映射到用户态和内核态
+        # 中相同的虚拟地址（TRAMPOLINE），
+        # 这样在切换页表时它仍能继续正常工作。
+        # kernel.ld 使这段代码从一个页边界处开始。
         #
 
 #include "riscv.h"

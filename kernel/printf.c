@@ -149,3 +149,15 @@ printfinit(void)
 {
   initlock(&pr.lock, "pr");
 }
+
+void
+backtrace() {
+  printf("backtrace:\n");
+  uint64 fp = r_fp();
+  uint64 maxfp = PGROUNDUP(fp);
+  while (fp != 0 && fp < maxfp) {
+    uint64 ra = *(uint64 *)(fp - 8);
+    printf("%p\n", (void *)ra);
+    fp = *(uint64 *)(fp - 16);
+  }
+}

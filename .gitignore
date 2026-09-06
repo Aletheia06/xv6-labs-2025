@@ -27,3 +27,8 @@ barrier
 *.pcap
 TAGS
 
+
+# local junk
+.idea/
+.claude/
+fs.img.bk
