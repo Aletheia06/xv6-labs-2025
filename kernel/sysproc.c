@@ -105,3 +105,16 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+
+uint64
+sys_sigalarm(void) {
+  int alarm_interval; // 时钟周期
+  uint64 handler; // 函数指针
+  argint(0, &alarm_interval); //获取周期
+  argaddr(1, &handler); // 获取指针
+  myproc()->alarm_interval = alarm_interval;
+  myproc()->ticks = 0;
+  myproc()->handler = handler;
+  return 0;
+}

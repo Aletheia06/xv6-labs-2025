@@ -503,3 +503,14 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64
+sys_sigreturn(void) {
+  struct proc *p = myproc();
+  if (p->is_called) {
+    *p->trapframe = p->save_trapframe;
+    p->is_called = 0;
+    p->ticks = 0;
+  }
+  return p->save_trapframe.a0;
+}
