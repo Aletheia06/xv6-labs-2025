@@ -299,7 +299,6 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -308,13 +307,22 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       continue;   // physical page hasn't been allocated
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+
+    /* 然后我们需要清除设置了PTE_W的页面
+     * 并且标记为COW
+     */
+    if ((*pte & PTE_W)) {
+      *pte = *pte & ~PTE_W;
+      flags = flags & ~PTE_W;
+      *pte = *pte | PTE_COW;
+      flags = flags | PTE_COW;
+    }
+
+    //printf("uvmcopy va=%lu, pte = %lu, flags = %u\n", i, *pte, flags);
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
       goto err;
     }
+    krefinc((void *)pa);
   }
   return 0;
 
@@ -359,8 +367,12 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
     pte = walk(pagetable, va0, 0);
     // forbid copyout over read-only user text pages.
-    if((*pte & PTE_W) == 0)
-      return -1;
+    if((*pte & PTE_W) == 0) {
+      if (*pte & PTE_COW) {
+        if ((pa0 = vmfault(pagetable, va0, 0)) == 0) return -1;
+      }
+      else return -1;
+    }
       
     n = PGSIZE - (dstva - va0);
     if(n > len)
@@ -459,6 +471,31 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
     return 0;
   va = PGROUNDDOWN(va);
   if(ismapped(pagetable, va)) {
+    // 只有COW有可能
+    pte_t *pte;
+    if ((pte = walk(pagetable, va, 0)) == 0) {
+      return 0;
+    }
+
+    uint flags = PTE_FLAGS(*pte);
+
+    if ((*pte & PTE_COW) != 0) {
+      // COW condition
+      mem = (uint64) kalloc();
+      if (mem == 0)
+        return 0;
+      uint64 pa = PTE2PA(*pte);
+      memmove((void *)mem, (char*)pa, PGSIZE);
+      // 这里就是为了减少引用计数
+      kfree((void *)pa);
+      flags = flags | PTE_W ;
+      flags = flags & ~PTE_COW;
+      *pte = PA2PTE(mem) | flags;
+
+      return mem;
+    }
+
+    // not COW condition
     return 0;
   }
   mem = (uint64) kalloc();
