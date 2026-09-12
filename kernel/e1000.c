@@ -135,6 +135,7 @@ e1000_transmit(char *buf, int len)
   tx_ring[idx].addr = (uint64)buf; // 把指针存进去
   tx_ring[idx].length = len; // 把长度存进去
   tx_ring[idx].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS; // 标记cmd，一个是说明包到尾了，另一个是要报告
+  tx_ring[idx].status = 0;
 
   // 接下来我们让E1000_TDT寄存器更新一下，变成idx的下一个
   // 因为是环形的，需要取模
@@ -155,6 +156,57 @@ e1000_recv(void)
   // Create and deliver a buf for each packet (using net_rx()).
   //
 
+  // 首先我们还是获取锁
+  acquire(&e1000_lock);
+
+  // 然后我们从E1000_RDT获取RX索引
+  // 因为RDT存储的是最后一个已经处理的索引
+  // 所以我们需要 + 1
+  uint32 idx = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+
+  // 循环检查status，看是不是包含DD
+  // 也就是检查是否有包到达了
+  while ((rx_ring[idx].status & E1000_RXD_STAT_DD) != 0) {
+    // 有包
+    char *buf = (char *)rx_ring[idx].addr; // 获取buf指针
+    int len = rx_ring[idx].length; // 获取len长度
+
+    // 我们需要kalloc一块地址给rx_ring[idx].addr用
+    char *new_buf = kalloc();
+    // kalloc失败
+    if (new_buf == 0) {
+      panic("e1000_recv kalloc");
+    }
+
+    // 把新的kalloc的地址给addr
+    rx_ring[idx].addr = (uint64)new_buf;
+
+    // 给rx_ring[idx].status清零
+    // 因为发送处理完了
+    rx_ring[idx].status = 0;
+
+    // 最后更新 E1000_RDT 寄存器
+    // 其值为已处理的最后一个环形描述符的索引
+    regs[E1000_RDT] = idx;
+    // 马上计算下一个idx
+    idx = (idx + 1) % RX_RING_SIZE;
+
+    // 释放锁
+    release(&e1000_lock);
+    net_rx(buf, len); // 调用net_rx，解析数据包并传输请求
+
+    /* 之所以在net_rx之前释放锁
+     * 是因为调用net_rx时不能持有锁
+     * 因为他有可能调用e1000_transmit()
+     * 这个函数也会acquire锁
+     * 从而导致死锁
+     */
+
+    // 重新上锁
+    acquire(&e1000_lock);
+  }
+  // 最后释放锁
+  release(&e1000_lock);
 }
 
 void
