@@ -19,6 +19,26 @@ static uint8 host_mac[ETHADDR_LEN] = { 0x52, 0x55, 0x0a, 0x00, 0x02, 0x02 };
 
 static struct spinlock netlock;
 
+typedef struct packet {
+  uint32 ip_src; // 源ip地址
+  uint16 sport; // 源UDP端口号
+  uint16 len; // UDP荷载长度
+  char *buf; // 原始数据包内存指针
+  char *payload; // 指向UDP荷载起始位置的指针
+} packet;
+
+typedef struct socket {
+  int used; // 是否被绑定
+  uint16 port; // 本地绑定的UDP端口号
+  struct spinlock lock; // 保护这个socket的锁
+  struct packet packets[MAX_QUEUE_LEN]; // 数据包队列
+  int head; // 队头
+  int tail; // 队尾
+  int count; // 当前队列包数量
+} socket;
+
+
+
 void
 netinit(void)
 {
