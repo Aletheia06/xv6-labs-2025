@@ -131,7 +131,66 @@ sys_recv(void)
   //
   // Your code here.
   //
-  return -1;
+  int dport; // 目的端口
+  uint64 src; // 用户态指针——源IP
+  uint64 sport; // 源端口
+  uint64 buf; // 接收缓冲区
+  int maxlen; // 最大接收长度
+
+  // 获取这些字段
+  argint(0, &dport);
+  argaddr(1, &src);
+  argaddr(2, &sport);
+  argaddr(3, &buf);
+  argint(4, &maxlen);
+
+  // 上锁
+  acquire(&netlock);
+
+  // 寻找sockets.port等于dport的socket
+  int target_idx = -1;
+  for (int i = 0;i < 16;i++) {
+    if (sockets[i].used == 1 && sockets[i].port == dport) {
+      target_idx = i;
+    }
+  }
+
+  // 没找到
+  if (target_idx == -1) {
+    release(&netlock);
+    return -1;
+  }
+
+  // 包中没东西，睡眠
+  while (sockets[target_idx].count == 0) {
+    sleep((char *)&sockets[target_idx], &netlock);
+  }
+
+  // 先拿到head字段
+  int head = sockets[target_idx].head;
+
+  // 找到当前proc，为了得到pgtbl
+  struct proc *p = myproc();
+  // 获取head的packet
+  packet *pkt = &sockets[target_idx].packets[head];
+  // 为src复制packet中的ip_src
+  copyout(p->pagetable, src, (char *)&pkt->ip_src, sizeof(pkt->ip_src));
+  // 为sport复制packet中的sport
+  copyout(p->pagetable, sport, (char *)&pkt->sport, sizeof(pkt->sport));
+  // 复制payload
+  int copylen = pkt->len < maxlen ? pkt->len : maxlen;
+  copyout(p->pagetable, buf, (char *)pkt->payload, copylen);
+
+  // 给head增加1,并给count减1
+  sockets[target_idx].head = (sockets[target_idx].head + 1) % PACKET_SIZE;
+  sockets[target_idx].count = sockets[target_idx].count - 1;
+
+  // 释放掉原始网卡分配的buf首地址
+  kfree(pkt->buf);
+
+  // 解锁
+  release(&netlock);
+  return copylen;
 }
 
 // This code is lifted from FreeBSD's ping.c, and is copyright by the Regents
