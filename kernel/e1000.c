@@ -9,6 +9,7 @@
 
 #define TX_RING_SIZE 16
 static struct tx_desc tx_ring[TX_RING_SIZE] __attribute__((aligned(16)));
+static char *tx_bufs[TX_RING_SIZE];
 
 #define RX_RING_SIZE 16
 static struct rx_desc rx_ring[RX_RING_SIZE] __attribute__((aligned(16)));
@@ -105,7 +106,42 @@ e1000_transmit(char *buf, int len)
   // so that the caller knows to free buf.
   //
 
-  
+  // 首先我们获取锁
+  acquire(&e1000_lock);
+
+  // 然后我们获取idx
+  // idx从E1000_TDT的寄存器获取
+  uint32 idx= regs[E1000_TDT];
+  // 上面的idx代表的是我们接下来要用到的槽位的索引
+
+  // 然后我们需要检查一下DD位
+  // DD位用来标记上一个数据包是不是发送完了
+  // 没发完就是0，那么返回-1通知上层错误
+  if ((tx_ring[idx].status & E1000_TXD_STAT_DD) == 0) {
+    release(&e1000_lock);
+    return -1;
+  }
+
+  // 接下来，因为上一个数据包发完了
+  // 所以我们可以清除缓存了
+  // 不然会内存泄露的
+  if (tx_bufs[idx]) {
+    kfree(tx_bufs[idx]);
+    tx_bufs[idx] = 0;
+  }
+
+  // 接下来就可以设置cmd了
+  tx_bufs[idx] = buf; // 把缓冲区数据放在这里
+  tx_ring[idx].addr = (uint64)buf; // 把指针存进去
+  tx_ring[idx].length = len; // 把长度存进去
+  tx_ring[idx].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS; // 标记cmd，一个是说明包到尾了，另一个是要报告
+
+  // 接下来我们让E1000_TDT寄存器更新一下，变成idx的下一个
+  // 因为是环形的，需要取模
+  regs[E1000_TDT] = (idx + 1) % TX_RING_SIZE;
+
+  // 释放锁
+  release(&e1000_lock);
   return 0;
 }
 
