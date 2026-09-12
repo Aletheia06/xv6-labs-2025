@@ -10,6 +10,8 @@
 #include "file.h"
 #include "net.h"
 
+#define PACKET_SIZE 16
+
 // xv6's ethernet and IP addresses
 static uint8 local_mac[ETHADDR_LEN] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
 static uint32 local_ip = MAKE_IP_ADDR(10, 0, 2, 15);
@@ -18,6 +20,7 @@ static uint32 local_ip = MAKE_IP_ADDR(10, 0, 2, 15);
 static uint8 host_mac[ETHADDR_LEN] = { 0x52, 0x55, 0x0a, 0x00, 0x02, 0x02 };
 
 static struct spinlock netlock;
+
 
 typedef struct packet {
   uint32 ip_src; // 源ip地址
@@ -31,12 +34,13 @@ typedef struct socket {
   int used; // 是否被绑定
   uint16 port; // 本地绑定的UDP端口号
   struct spinlock lock; // 保护这个socket的锁
-  struct packet packets[MAX_QUEUE_LEN]; // 数据包队列
+  struct packet packets[PACKET_SIZE]; // 数据包队列
   int head; // 队头
   int tail; // 队尾
   int count; // 当前队列包数量
 } socket;
 
+socket sockets[16];
 
 
 void
@@ -304,7 +308,75 @@ ip_rx(char *buf, int len)
   //
   // Your code here.
   //
-  
+
+  // 剥离以太网头,检查是否是IP数据包
+  const struct eth *eth = (struct eth *)buf;
+  if (ntohs(eth->type) != ETHTYPE_IP) {
+    kfree(buf);
+    return;
+  }
+
+  // 剥离IP头，检查IP头是不是UDP
+  const struct ip *ip = (struct ip *)(buf + sizeof(struct eth));
+  if (ip->ip_p != IPPROTO_UDP) {
+    kfree(buf);
+    return;
+  }
+
+  // 剥离UDP头
+  const struct udp *udp = (struct udp *)(buf + sizeof(struct eth) + sizeof(struct ip));
+
+  // 获取字段
+  uint32 ip_src = ntohl(ip->ip_src); // 源IP
+  uint16 dport = ntohs(udp->dport); // 目的端口
+  uint16 sport = ntohs(udp->sport); // 源端口
+  uint16 ulen = ntohs(udp->ulen); // UDP长度
+
+  // 先上锁
+  acquire(&netlock);
+
+  // 遍历sockets找used == 1 && port == dport
+  int target_idx = -1;
+  for (int i = 0; i < 16; i++) {
+    if (sockets[i].used == 1 && sockets[i].port == dport) {
+      target_idx = i;
+    }
+  }
+
+  // 没找到
+  if (target_idx == -1) {
+    release(&netlock);
+    kfree(buf);
+    return;
+  }
+
+
+  // 如果当前队列包已满
+  // 释放锁并free掉buf,然后返回
+  // 也就是丢包
+  if (sockets[target_idx].count == PACKET_SIZE) {
+    release(&netlock);
+    kfree(buf);
+    return;
+  }
+
+  // 找到匹配的socket且队列未满
+  // 存储上面的那些信息
+  int tail = sockets[target_idx].tail; // 先拿到队列尾的位置
+  sockets[target_idx].packets[tail].ip_src = ip_src; // 赋值ip_src字段
+  sockets[target_idx].packets[tail].sport = sport; // 赋值source_port 字段
+  sockets[target_idx].packets[tail].buf = buf; // 赋值buffer字段
+  sockets[target_idx].packets[tail].len = ulen - sizeof(struct udp); // 赋值len字段，就是纯payload的长度
+  sockets[target_idx].packets[tail].payload = buf + sizeof(struct eth) + sizeof(struct ip) + sizeof(struct udp); // 偏移到payload起始点
+  sockets[target_idx].tail = (sockets[target_idx].tail + 1) % PACKET_SIZE; // 环形队列取模
+  sockets[target_idx].count = sockets[target_idx].count + 1; // 更新count字段
+
+  // 唤醒该进程
+  wakeup((char *)(&sockets[target_idx]));
+
+  // 解锁
+  release(&netlock);
+  return;
 }
 
 //
