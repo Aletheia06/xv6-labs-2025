@@ -57,6 +57,12 @@ sys_bind(void)
   //
   // Your code here.
   //
+  // 首先从寄存器获取端口号
+  int port;
+  argint(0, &port);
+
+  // 上锁
+  acquire(&netlock);
 
 
   // 寻找没用过的sockets
