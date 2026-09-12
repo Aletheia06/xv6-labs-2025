@@ -58,7 +58,35 @@ sys_bind(void)
   // Your code here.
   //
 
-  return -1;
+
+  // 寻找没用过的sockets
+  int idx = -1;
+  for (int i = 0;i < 16;i++) {
+    if (sockets[i].used == 1 && sockets[i].port == port) {
+      release(&netlock);
+      return -1;
+    }
+
+    if (sockets[i].used == 0 && idx == -1) {
+      idx = i;
+    }
+  }
+
+  // 没找到
+  if (idx == -1) {
+    release(&netlock);
+    return -1;
+  }
+
+  // 找到了，绑定
+  sockets[idx].used = 1;
+  sockets[idx].port = port;
+  sockets[idx].head = 0;
+  sockets[idx].tail = 0;
+  sockets[idx].count = 0;
+
+  release(&netlock);
+  return 0;
 }
 
 //
